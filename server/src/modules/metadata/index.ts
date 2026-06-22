@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { ensureDir, formatDate, getDirSize } from '../../utils';
 import { config } from '../../config';
-import type { PackageInfo, PackageVersion, CacheStats, StorageTrend, CachePolicy, RegistryType, PackageSource } from '../../types';
+import type { PackageInfo, PackageVersion, CacheStats, StorageTrend, CachePolicy, RegistryType, PackageSource, PackageVersionMetadata } from '../../types';
 
 interface DBPackage {
   id: number;
@@ -29,6 +29,21 @@ interface DBVersion {
   sha1?: string;
   publishedAt: number;
   downloadCount: number;
+  description?: string;
+  author?: string;
+  license?: string;
+  dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  engines?: Record<string, string>;
+  main?: string;
+  module?: string;
+  types?: string;
+  homepage?: string;
+  repository?: string;
+  keywords?: string[];
+  bugs?: string;
 }
 
 interface DB {
@@ -154,7 +169,8 @@ export class MetadataIndex {
     version: string,
     size: number,
     filePath: string,
-    sha1?: string
+    sha1?: string,
+    extraMetadata?: Partial<Omit<DBVersion, 'id' | 'packageId' | 'version' | 'size' | 'filePath' | 'sha1' | 'publishedAt' | 'downloadCount'>>
   ): void {
     const now = Date.now();
     const existing = this.db.versions.find(
@@ -165,6 +181,9 @@ export class MetadataIndex {
       existing.filePath = filePath;
       if (sha1) existing.sha1 = sha1;
       existing.publishedAt = now;
+      if (extraMetadata) {
+        Object.assign(existing, extraMetadata);
+      }
     } else {
       const id = this.db.nextVersionId++;
       this.db.versions.push({
@@ -176,12 +195,73 @@ export class MetadataIndex {
         sha1,
         publishedAt: now,
         downloadCount: 0,
+        ...extraMetadata,
       });
     }
     this.recalcPackageSize(packageId);
     const pkg = this.db.packages.find((p) => p.id === packageId);
     if (pkg) pkg.updatedAt = now;
     this.scheduleSave();
+  }
+
+  getVersionMetadata(
+    packageName: string,
+    registry: RegistryType,
+    version: string
+  ): PackageVersionMetadata | null {
+    const pkg = this.db.packages.find(
+      (p) => p.name === packageName && p.registry === registry
+    );
+    if (!pkg) return null;
+    const ver = this.db.versions.find(
+      (v) => v.packageId === pkg.id && v.version === version
+    );
+    if (!ver) return null;
+
+    return {
+      version: ver.version,
+      description: ver.description ?? pkg.description,
+      author: ver.author ?? pkg.author,
+      license: ver.license ?? pkg.license,
+      size: ver.size,
+      publishedAt: ver.publishedAt,
+      downloadCount: ver.downloadCount,
+      dependencies: ver.dependencies,
+      peerDependencies: ver.peerDependencies,
+      optionalDependencies: ver.optionalDependencies,
+      devDependencies: ver.devDependencies,
+      engines: ver.engines,
+      main: ver.main,
+      module: ver.module,
+      types: ver.types,
+      homepage: ver.homepage,
+      repository: ver.repository,
+      keywords: ver.keywords,
+      bugs: ver.bugs,
+    };
+  }
+
+  updateVersionMetadata(
+    packageName: string,
+    registry: RegistryType,
+    version: string,
+    metadata: Partial<Omit<DBVersion, 'id' | 'packageId'>>
+  ): boolean {
+    const pkg = this.db.packages.find(
+      (p) => p.name === packageName && p.registry === registry
+    );
+    if (!pkg) return false;
+    const ver = this.db.versions.find(
+      (v) => v.packageId === pkg.id && v.version === version
+    );
+    if (!ver) return false;
+
+    Object.assign(ver, metadata);
+    const now = Date.now();
+    ver.publishedAt = metadata.publishedAt ?? ver.publishedAt;
+    pkg.updatedAt = now;
+    this.scheduleSave();
+    return true;
   }
 
   private recalcPackageSize(packageId: number): void {

@@ -7,6 +7,9 @@ import type {
   HealthInfo,
   RegistryType,
   PackageSource,
+  PackageVersionMetadata,
+  CompareResult,
+  FileContentDiff,
 } from './types';
 
 const API_BASE = '/api';
@@ -89,4 +92,19 @@ export const api = {
     request<{ success: boolean; timestamp: number }>('/cache/snapshot', {
       method: 'POST',
     }),
+
+  getVersionMetadata: (registry: RegistryType, name: string, version: string) =>
+    request<PackageVersionMetadata>(
+      `/packages/${registry}/${encodeURIComponent(name)}/versions/${version}/metadata`
+    ),
+
+  compareVersions: (registry: RegistryType, name: string, versionA: string, versionB: string) =>
+    request<CompareResult>(
+      `/packages/${registry}/${encodeURIComponent(name)}/compare/${versionA}/${versionB}`
+    ),
+
+  diffFileContent: (registry: RegistryType, name: string, versionA: string, versionB: string, filePath: string) =>
+    request<FileContentDiff>(
+      `/packages/${registry}/${encodeURIComponent(name)}/compare/${versionA}/${versionB}/file-diff?path=${encodeURIComponent(filePath)}`
+    ),
 };

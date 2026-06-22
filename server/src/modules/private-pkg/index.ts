@@ -3,7 +3,8 @@ import { config } from '../../config';
 import { getMetadataIndex } from '../metadata';
 import { getCacheStorage } from '../cache';
 import { parseNpmPackageName } from '../../utils';
-import type { RegistryType, PackageSource, PackageVersion } from '../../types';
+import { comparePackageVersions, extractPackageMetadata, diffFileContent } from '../package-analyzer';
+import type { RegistryType, PackageSource, PackageVersion, PackageVersionMetadata, CompareResult, FileContentDiff } from '../../types';
 import semver from 'semver';
 
 const router = Router();
@@ -168,6 +169,155 @@ router.post('/cache/snapshot', (_req: Request, res: Response) => {
   const metadata = getMetadataIndex();
   metadata.recordStorageSnapshot();
   res.json({ success: true, timestamp: Date.now() });
+});
+
+router.get('/packages/:registry/:name/versions/:version/metadata', async (req: Request, res: Response) => {
+  const metadata = getMetadataIndex();
+  const cache = getCacheStorage();
+  const registry = req.params.registry as RegistryType;
+  const name = decodeURIComponent(req.params.name as string);
+  const version = req.params.version as string;
+
+  const pkg = metadata.getPackage(name, registry);
+  if (!pkg) {
+    res.status(404).json({ error: 'Package not found' });
+    return;
+  }
+
+  const ver = pkg.versions.find((v: PackageVersion) => v.version === version);
+  if (!ver) {
+    res.status(404).json({ error: 'Version not found' });
+    return;
+  }
+
+  let meta = metadata.getVersionMetadata(name, registry, version);
+  if (!meta) {
+    res.status(404).json({ error: 'Version metadata not found' });
+    return;
+  }
+
+  const hasDetailed = meta.dependencies || meta.main || meta.homepage;
+  if (!hasDetailed && cache.fileExists(ver.filePath)) {
+    const extracted = await extractPackageMetadata(ver.filePath, registry);
+    if (Object.keys(extracted).length > 0) {
+      metadata.updateVersionMetadata(name, registry, version, extracted);
+      meta = metadata.getVersionMetadata(name, registry, version) || meta;
+    }
+  }
+
+  res.json(meta);
+});
+
+router.get('/packages/:registry/:name/compare/:versionA/:versionB', async (req: Request, res: Response) => {
+  const metadata = getMetadataIndex();
+  const cache = getCacheStorage();
+  const registry = req.params.registry as RegistryType;
+  const name = decodeURIComponent(req.params.name as string);
+  const versionA = req.params.versionA as string;
+  const versionB = req.params.versionB as string;
+
+  const pkg = metadata.getPackage(name, registry);
+  if (!pkg) {
+    res.status(404).json({ error: 'Package not found' });
+    return;
+  }
+
+  const verA = pkg.versions.find((v: PackageVersion) => v.version === versionA);
+  const verB = pkg.versions.find((v: PackageVersion) => v.version === versionB);
+  if (!verA || !verB) {
+    res.status(404).json({ error: 'One or both versions not found' });
+    return;
+  }
+
+  let metaA = metadata.getVersionMetadata(name, registry, versionA);
+  let metaB = metadata.getVersionMetadata(name, registry, versionB);
+
+  if (!metaA || !metaB) {
+    res.status(404).json({ error: 'Version metadata not found' });
+    return;
+  }
+
+  const hasDetailedA = metaA.dependencies || metaA.main || metaA.homepage;
+  const hasDetailedB = metaB.dependencies || metaB.main || metaB.homepage;
+
+  if (!hasDetailedA && cache.fileExists(verA.filePath)) {
+    const extracted = await extractPackageMetadata(verA.filePath, registry);
+    if (Object.keys(extracted).length > 0) {
+      metadata.updateVersionMetadata(name, registry, versionA, extracted);
+      metaA = metadata.getVersionMetadata(name, registry, versionA) || metaA;
+    }
+  }
+
+  if (!hasDetailedB && cache.fileExists(verB.filePath)) {
+    const extracted = await extractPackageMetadata(verB.filePath, registry);
+    if (Object.keys(extracted).length > 0) {
+      metadata.updateVersionMetadata(name, registry, versionB, extracted);
+      metaB = metadata.getVersionMetadata(name, registry, versionB) || metaB;
+    }
+  }
+
+  try {
+    const result: CompareResult = await comparePackageVersions(
+      name,
+      registry,
+      versionA,
+      versionB,
+      metaA,
+      metaB,
+      verA.filePath,
+      verB.filePath
+    );
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: 'Compare failed', message: e.message });
+  }
+});
+
+router.get('/packages/:registry/:name/compare/:versionA/:versionB/file-diff', async (req: Request, res: Response) => {
+  const metadata = getMetadataIndex();
+  const cache = getCacheStorage();
+  const registry = req.params.registry as RegistryType;
+  const name = decodeURIComponent(req.params.name as string);
+  const versionA = req.params.versionA as string;
+  const versionB = req.params.versionB as string;
+  const filePath = typeof req.query.path === 'string' ? decodeURIComponent(req.query.path) : '';
+
+  if (!filePath) {
+    res.status(400).json({ error: 'File path is required' });
+    return;
+  }
+
+  const pkg = metadata.getPackage(name, registry);
+  if (!pkg) {
+    res.status(404).json({ error: 'Package not found' });
+    return;
+  }
+
+  const verA = pkg.versions.find((v: PackageVersion) => v.version === versionA);
+  const verB = pkg.versions.find((v: PackageVersion) => v.version === versionB);
+  if (!verA || !verB) {
+    res.status(404).json({ error: 'One or both versions not found' });
+    return;
+  }
+
+  if (!cache.fileExists(verA.filePath) || !cache.fileExists(verB.filePath)) {
+    res.status(404).json({ error: 'Package file not found in cache' });
+    return;
+  }
+
+  try {
+    const result: FileContentDiff = await diffFileContent(
+      registry,
+      versionA,
+      versionB,
+      filePath,
+      verA.filePath,
+      verB.filePath
+    );
+    res.json(result);
+  } catch (e: any) {
+    res.status(500).json({ error: 'File diff failed', message: e.message, status: 'error', path: filePath });
+  }
 });
 
 export { router as privatePkgRouter };
