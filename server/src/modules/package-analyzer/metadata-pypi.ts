@@ -29,6 +29,71 @@ function parsePkginfo(content: string): Record<string, string> {
   return result;
 }
 
+function parseProjectUrls(raw: string): Array<{ label: string; url: string }> {
+  const result: Array<{ label: string; url: string }> = [];
+  const lines = raw.split('\n');
+  for (const line of lines) {
+    const commaIdx = line.indexOf(',');
+    if (commaIdx > 0) {
+      const label = line.slice(0, commaIdx).trim();
+      const url = line.slice(commaIdx + 1).trim();
+      if (label && url) {
+        result.push({ label, url });
+      }
+    }
+  }
+  return result;
+}
+
+function extractLicenseFromClassifiers(classifiers: string[]): string | null {
+  const licenseCls = classifiers.filter((c) => c.startsWith('License :: '));
+  if (licenseCls.length === 0) return null;
+
+  const specific = licenseCls.filter(
+    (c) => !c.includes(' :: OSI Approved') && c !== 'License :: OSI Approved'
+  );
+  const target = specific.length > 0 ? specific[specific.length - 1] : licenseCls[licenseCls.length - 1];
+  const parts = target.split(' :: ');
+  return parts[parts.length - 1].trim();
+}
+
+function extractRepositoryUrl(urls: Array<{ label: string; url: string }>): string | null {
+  const exactPriority = [
+    'Repository',
+    'Source',
+    'Source Code',
+    'Code',
+    'GitHub',
+    'GitLab',
+    'Bitbucket',
+    'Homepage',
+  ];
+
+  for (const label of exactPriority) {
+    const found = urls.find((u) => u.label.toLowerCase() === label.toLowerCase());
+    if (found) return found.url;
+  }
+
+  const fuzzyPriority = [
+    /repository/i,
+    /^source(\s|$)/i,
+    /\bsource\s*code\b/i,
+    /^github(\s|$)/i,
+    /^gitlab(\s|$)/i,
+    /^code(\s|$)/i,
+  ];
+
+  for (const pattern of fuzzyPriority) {
+    const found = urls.find((u) => pattern.test(u.label));
+    if (found) return found.url;
+  }
+
+  const githubUrl = urls.find((u) => /github\.com/i.test(u.url));
+  if (githubUrl) return githubUrl.url;
+
+  return null;
+}
+
 function extractPypiMetadataFromPkginfo(data: Record<string, string>): Partial<PackageVersionMetadata> {
   const metadata: Partial<PackageVersionMetadata> = {};
 
@@ -49,37 +114,34 @@ function extractPypiMetadataFromPkginfo(data: Record<string, string>): Partial<P
     metadata.author = maintainer;
   }
 
-  if (data['License']) metadata.license = data['License'];
-
   if (data['Home-page']) metadata.homepage = data['Home-page'];
 
+  const allUrls: Array<{ label: string; url: string }> = [];
+  if (data['Home-page']) {
+    allUrls.push({ label: 'Homepage', url: data['Home-page'] });
+  }
   if (data['Project-URL']) {
-    const urls = data['Project-URL'].split('\n');
-    for (const url of urls) {
-      if (url.toLowerCase().includes('repository') || url.toLowerCase().includes('github') || url.toLowerCase().includes('source')) {
-        const parts = url.split(',');
-        if (parts.length >= 2) {
-          metadata.repository = parts.slice(1).join(',').trim();
-          break;
-        }
-      }
-    }
+    allUrls.push(...parseProjectUrls(data['Project-URL']));
+  }
+
+  if (allUrls.length > 0) {
+    const repoUrl = extractRepositoryUrl(allUrls);
+    if (repoUrl) metadata.repository = repoUrl;
   }
 
   if (data['Keywords']) {
-    metadata.keywords = data['Keywords'].split(/[, ]+/).filter(Boolean);
+    metadata.keywords = data['Keywords']
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
   }
 
-  if (data['Classifier']) {
-    const classifiers = data['Classifier'].split('\n');
-    for (const cls of classifiers) {
-      if (cls.startsWith('License :: ')) {
-        const parts = cls.split(' :: ');
-        if (!metadata.license) {
-          metadata.license = parts[parts.length - 1].trim();
-        }
-      }
-    }
+  const classifiers = data['Classifier'] ? data['Classifier'].split('\n') : [];
+  const classifierLicense = extractLicenseFromClassifiers(classifiers);
+  if (classifierLicense) {
+    metadata.license = classifierLicense;
+  } else if (data['License']) {
+    metadata.license = data['License'];
   }
 
   if (data['Requires-Dist']) {
